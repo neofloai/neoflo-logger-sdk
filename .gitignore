@@ -1,0 +1,42 @@
+# Python bytecode — never commit compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging artifacts
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+MANIFEST
+
+# Virtual environments — each developer keeps their own venv locally
+.venv/
+venv/
+env/
+ENV/
+
+# Editable installs (pip install -e .) place a direct URL reference here
+*.pth
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.lcov
+
+# Type checker caches
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# IDE project files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS metadata
+.DS_Store
