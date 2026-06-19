@@ -45,8 +45,8 @@ import logging
 
 from opentelemetry import trace
 from opentelemetry._logs import set_logger_provider
-from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
@@ -113,7 +113,6 @@ def setup_otel(
     else:
         span_exporter = OTLPSpanExporter(
             endpoint=otlp_endpoint,
-            insecure=True,
         )
         provider = TracerProvider(resource=resource)
         provider.add_span_processor(BatchSpanProcessor(span_exporter))
@@ -130,7 +129,6 @@ def setup_otel(
     # calls never block the request thread.
     log_exporter = OTLPLogExporter(
         endpoint=otlp_endpoint,
-        insecure=True,
     )
     log_provider = LoggerProvider(resource=resource)
     log_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
