@@ -112,7 +112,7 @@ def setup_otel(
         )
     else:
         span_exporter = OTLPSpanExporter(
-            endpoint=otlp_endpoint,
+            endpoint=f"{otlp_endpoint.rstrip('/')}/v1/traces",
         )
         provider = TracerProvider(resource=resource)
         provider.add_span_processor(BatchSpanProcessor(span_exporter))
@@ -128,7 +128,7 @@ def setup_otel(
     # BatchLogRecordProcessor buffers and sends them asynchronously so log
     # calls never block the request thread.
     log_exporter = OTLPLogExporter(
-        endpoint=otlp_endpoint,
+        endpoint=f"{otlp_endpoint.rstrip('/')}/v1/logs",
     )
     log_provider = LoggerProvider(resource=resource)
     log_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
