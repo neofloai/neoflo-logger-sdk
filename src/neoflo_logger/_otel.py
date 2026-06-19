@@ -44,7 +44,11 @@ from __future__ import annotations
 import logging
 
 from opentelemetry import trace
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -52,73 +56,104 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 _sdk_logger = logging.getLogger(__name__)
 
 
+class _DictAttributeSerializer(logging.Filter):
+    """Serialize dict/list log record attributes to JSON strings.
+
+    OTel log attributes only accept primitive types. Any extra field set on a
+    LogRecord as a dict or list (e.g. event_data) must be converted to a JSON
+    string before the LoggingHandler tries to forward it as an OTel attribute.
+    """
+
+    import json as _json
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        import json
+        for key, val in vars(record).items():
+            if isinstance(val, (dict, list)):
+                setattr(record, key, json.dumps(val, default=str))
+        return True
+
+
 def setup_otel(
     service_name: str,
     otlp_endpoint: str,
     environment: str,
 ) -> None:
-    """Bootstrap the global OpenTelemetry Trace provider.
+    """Bootstrap the global OpenTelemetry Trace and Log providers.
 
-    This function is idempotent with respect to the global provider — if
+    This function is idempotent with respect to the global trace provider — if
     a provider is already registered (e.g. by opentelemetry-instrumentation-
     fastapi auto-instrumentation), we do NOT replace it. We only set up a
-    new provider if the current global is the no-op default.
+    new trace provider if the current global is the no-op default.
+
+    The log provider is always set up when this function is called, because
+    Python's logging.LoggingHandler bridges stdlib log records into the OTel
+    log pipeline, which is what ships logs to the collector and Coralogix.
 
     Args:
-        service_name: Appears as ``service.name`` in every span.
+        service_name: Appears as ``service.name`` in every span and log record.
         otlp_endpoint: gRPC endpoint, e.g. "http://otel-collector:4317".
-        environment: Appears as ``deployment.environment`` in every span.
+        environment: Appears as ``deployment.environment`` in every span/log.
                      Enables per-environment filtering in Coralogix.
     """
-    # OTel ``Resource`` carries process-level metadata that appears on every
-    # span emitted by this process. We add ``deployment.environment`` because
-    # the default Resource only includes ``service.name`` and ``telemetry.sdk.*``.
     resource = Resource.create(
         {
             "service.name": service_name,
             "deployment.environment": environment,
-            # service.version would go here once we expose it from pyproject.toml
         }
     )
 
-    # Check if a non-default provider is already installed.
-    # We use ``isinstance`` rather than ``is`` because auto-instrumentation
-    # may have installed a subclass of NoOpTracer.
+    # --- Trace pipeline ---
     existing = trace.get_tracer_provider()
     if not isinstance(existing, trace.NoOpTracerProvider):
-        # A real provider is already installed — trust it and don't override.
-        # This is the expected path when opentelemetry-instrumentation-fastapi
-        # is enabled: it installs the provider before our startup code runs.
         _sdk_logger.debug(
             "otel_provider_already_configured",
             extra={"event_label": "otel_provider_already_configured"},
         )
-        return
+    else:
+        span_exporter = OTLPSpanExporter(
+            endpoint=otlp_endpoint,
+            insecure=True,
+        )
+        provider = TracerProvider(resource=resource)
+        provider.add_span_processor(BatchSpanProcessor(span_exporter))
+        trace.set_tracer_provider(provider)
 
-    # --- Create exporter ---
-    # insecure=True is required for plain-text gRPC (port 4317 without TLS).
-    # Our collector runs inside the VPC — TLS termination happens at the
-    # load-balancer level, not at the collector gRPC endpoint.
-    span_exporter = OTLPSpanExporter(
+        _sdk_logger.debug(
+            "otel_trace_provider_configured",
+            extra={"event_label": "otel_trace_provider_configured"},
+        )
+
+    # --- Log pipeline ---
+    # OTLPLogExporter ships log records to the collector over gRPC.
+    # BatchLogRecordProcessor buffers and sends them asynchronously so log
+    # calls never block the request thread.
+    log_exporter = OTLPLogExporter(
         endpoint=otlp_endpoint,
         insecure=True,
     )
+    log_provider = LoggerProvider(resource=resource)
+    log_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+    set_logger_provider(log_provider)
 
-    # --- Create provider ---
-    provider = TracerProvider(resource=resource)
-
-    # BatchSpanProcessor sends spans asynchronously in the background,
-    # which is required for production. SynchronousSpanProcessor would block
-    # the request thread on every span export — unacceptable latency.
-    provider.add_span_processor(BatchSpanProcessor(span_exporter))
-
-    # Register as the global provider. After this line, any call to
-    # ``opentelemetry.trace.get_tracer()`` will use this provider.
-    trace.set_tracer_provider(provider)
+    # LoggingHandler bridges Python's stdlib logging module into the OTel log
+    # pipeline. Any log record that reaches the root logger is forwarded to
+    # log_provider, which batches and ships it to the collector.
+    # level=logging.NOTSET means all levels pass through — the root logger's
+    # own level filter is the single source of truth for what gets logged.
+    otel_log_handler = LoggingHandler(
+        level=logging.NOTSET,
+        logger_provider=log_provider,
+    )
+    # OTel attributes only support primitives (str, int, float, bool).
+    # Serialize any dict/list extras (e.g. event_data) to JSON strings so
+    # the handler doesn't drop them with an "Invalid type" error.
+    otel_log_handler.addFilter(_DictAttributeSerializer())
+    logging.getLogger().addHandler(otel_log_handler)
 
     _sdk_logger.debug(
-        "otel_trace_provider_configured",
-        extra={"event_label": "otel_trace_provider_configured"},
+        "otel_log_provider_configured",
+        extra={"event_label": "otel_log_provider_configured"},
     )
 
 
@@ -128,28 +163,11 @@ def get_current_trace_id() -> str:
     Returns:
         A 32-character lowercase hex string if a real span is active,
         or "-" if no span is active (e.g. background tasks, startup code).
-
-    WHY 32 HEX CHARS
-    -----------------
-    OTel trace IDs are 128-bit values. Their canonical hex representation is
-    32 lowercase characters with no dashes (unlike UUID's 36-character format).
-    Coralogix and Jaeger expect this format for trace linkage to work.
-
-    WHY NOT RAISE ON INVALID
-    -------------------------
-    It's normal for log calls to happen outside of a span (module import,
-    startup, background tasks). Raising would force callers to guard every log
-    call with a span existence check — bad ergonomics. Instead we return "-"
-    which is a clearly non-trace value that operators can recognize.
     """
     span = trace.get_current_span()
     ctx = span.get_span_context()
 
-    # INVALID_SPAN_CONTEXT is the sentinel returned when no span is active.
-    # We check ``is_valid`` rather than comparing to the sentinel directly
-    # because the OTel spec says is_valid is the canonical validity check.
     if not ctx.is_valid:
         return "-"
 
-    # trace_id is a Python int; format as 32-char lowercase hex with zero-padding.
     return format(ctx.trace_id, "032x")
