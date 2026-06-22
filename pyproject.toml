@@ -23,10 +23,10 @@ dependencies = [
     # Full OpenTelemetry SDK — needed to create LoggerProvider and configure
     # trace/log pipelines. Services that don't want SDK can stub this out.
     "opentelemetry-sdk>=1.25.0",
-    # gRPC OTLP exporter — sends log records and traces to the collector.
-    # We use gRPC (not HTTP/protobuf) because the Neoflo collector is configured
-    # on port 4317 (gRPC), which has better throughput than HTTP on 4318.
-    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+    # HTTP OTLP exporter — sends log records and traces to the collector over
+    # HTTP/protobuf on port 4318. The Neoflo collector accepts both gRPC (4317)
+    # and HTTP (4318); HTTP is used here as it requires no gRPC channel setup.
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
     # Starlette is the ASGI framework that FastAPI is built on. We depend on
     # starlette directly (not fastapi) so middleware works in any Starlette app,
     # not just FastAPI. This keeps the middleware portable across services.
